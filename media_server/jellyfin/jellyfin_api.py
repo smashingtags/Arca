@@ -1,10 +1,8 @@
 import requests
-import requests_async as req_async
-import time
 import socket
 import json
 from urllib.parse import urlencode
-import emby.settings as settings
+from media_server.jellyfin import settings as settings
 
 token_header = None
 admin_id = None
@@ -23,58 +21,43 @@ def authenticate():
             Version=1,
             Token=""  # not required
         )}
-    data = {'Username': settings.EMBY_ADMIN_USERNAME, 'Password': settings.EMBY_ADMIN_PASSWORD,
-            'Pw': settings.EMBY_ADMIN_PASSWORD}
+    data = {'Username': settings.JELLYFIN_ADMIN_USERNAME, 'Password': settings.JELLYFIN_ADMIN_PASSWORD,
+            'Pw': settings.JELLYFIN_ADMIN_PASSWORD}
     try:
         res = postWithToken(hdr=xEmbyAuth, method='/Users/AuthenticateByName', data=data).json()
         token_header = {'X-Emby-Token': '{}'.format(res['AccessToken'])}
         admin_id = res['User']['Id']
     except Exception as e:
-        print('Could not log into Emby.\n{}'.format(e))
+        print('Could not log into Jellyfin.\n{}'.format(e))
 
 
 def get(cmd, params=None):
     return json.loads(requests.get(
-        '{}{}?api_key={}{}'.format(settings.EMBY_URL, cmd, settings.EMBY_API_KEY,
+        '{}{}?api_key={}{}'.format(settings.JELLYFIN_URL, cmd, settings.JELLYFIN_API_KEY,
                                    ("&" + params if params else ""))).text)
 
 
 def getWithToken(hdr, method, data=None):
     hdr = {'accept': 'application/json', **hdr}
-    res = requests.get('{}{}'.format(settings.EMBY_URL, method), headers=hdr, data=json.dumps(data)).json()
+    res = requests.get('{}{}'.format(settings.JELLYFIN_URL, method), headers=hdr, data=json.dumps(data)).json()
     return res
 
 
 def post(cmd, params, payload):
     return requests.post(
-        '{}{}?api_key={}{}'.format(settings.EMBY_URL, cmd, settings.EMBY_API_KEY,
+        '{}{}?api_key={}{}'.format(settings.JELLYFIN_URL, cmd, settings.JELLYFIN_API_KEY,
                                    ("&" + params if params is not None else "")),
         json=payload)
 
 
 def postWithToken(hdr, method, data=None):
     hdr = {'accept': 'application/json', 'Content-Type': 'application/json', **hdr}
-    print(hdr)
-    print('{}{}'.format(settings.EMBY_URL, method))
-    return requests.post('{}{}'.format(settings.EMBY_URL, method), headers=hdr, data=json.dumps(data))
-
-
-async def postWithTokenWait(hdr, method, data=None):
-    hdr = {'accept': 'application/json', 'Content-Type': 'application/json', **hdr}
-    print(hdr)
-    print('{}{}'.format(settings.EMBY_URL, method))
-    res = await req_async.post('{}{}'.format(settings.EMBY_URL, method), headers=hdr, data=json.dumps(data), timeout=10, stream=True)
-    while str(res.status_code).startswith('5'):
-        print(res.status_code)
-        time.sleep(1)
-    print(res.status_code)
-    return res
-    # return requests.post('{}{}'.format(settings.EMBY_URL, method), headers=hdr, data=json.dumps(data))
+    return requests.post('{}{}'.format(settings.JELLYFIN_URL, method), headers=hdr, data=json.dumps(data))
 
 
 def delete(cmd, params):
     return requests.delete(
-        '{}{}?api_key={}{}'.format(settings.EMBY_URL, cmd, settings.EMBY_API_KEY,
+        '{}{}?api_key={}{}'.format(settings.JELLYFIN_URL, cmd, settings.JELLYFIN_API_KEY,
                                    ("&" + params if params is not None else "")))
 
 
@@ -86,18 +69,14 @@ def makeUser(username):
     return post(url, None, payload=data)
 
 
-async def addConnectUser(connect_username, user_id):
-    url = '/Users/{}/Connect/Link?connectUsername={}'.format(user_id, connect_username)
-    res = postWithToken(hdr=token_header, method=url)
-    time.sleep(1)
-    print(res)
-    print(res.text)
-    return res
-
-
 def deleteUser(userId):
-    url = '/Users/{}'.format(str(userId))
-    return delete(url, None)
+    # Doesn't delete user, instead makes de-active.
+    payload = {
+        "IsDisabled": "true",
+    }
+    return updatePolicy(userId, policy=payload)
+    # url = '/Users/{}'.format(str(userId))
+    # return delete(url, None)
 
 
 def resetPassword(userId):
@@ -121,7 +100,7 @@ def setUserPassword(userId, currentPass, newPass):
 
 def updatePolicy(userId, policy=None):
     if not policy:
-        policy = settings.EMBY_USER_POLICY
+        policy = settings.JELLYFIN_USER_POLICY
     url = '/Users/{}/Policy'.format(userId)
     return postWithToken(hdr=token_header, method=url, data=policy)
 
@@ -166,4 +145,4 @@ def statsCustomQuery(query):
 
 
 def getStatus():
-    return requests.get('{}/swagger'.format(settings.EMBY_URL), timeout=10).status_code
+    return requests.get('{}/swagger'.format(settings.JELLYFIN_URL), timeout=10).status_code

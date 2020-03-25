@@ -9,12 +9,14 @@ from collections import defaultdict
 import datetime
 from decimal import *
 import asyncio
-import plex.plex_api as px
+import media_server.plex.plex_api as px
 from helper.db_commands import DB
-import plex.settings as settings
-import plex.plex_recs as pr
+from media_server.plex import settings as settings
+from media_server.plex import plex_recs as pr
+from helper.helper_functions import filesize
 
-db = DB(SERVER_TYPE='Plex', SQLITE_FILE=settings.SQLITE_FILE, TRIAL_LENGTH=None, MULTI_PLEX=None, USE_DROPBOX=settings.USE_DROPBOX)
+db = DB(SERVER_TYPE='Plex', SQLITE_FILE=settings.SQLITE_FILE, TRIAL_LENGTH=None, MULTI_PLEX=None,
+        BLACKLIST_FILE='../blacklist.db', USE_DROPBOX=settings.USE_DROPBOX)
 
 owner_players = []
 # Numbers 1-9
@@ -46,7 +48,7 @@ class Plex(commands.Cog):
         print("Libraries updated.")
         print("Plex ready.")
 
-    @commands.group(aliases=["Plex"], pass_context=True)
+    @commands.group(name="plex", aliases=["Plex"], pass_context=True)
     async def plex(self, ctx: commands.Context):
         """
         Plex Media Server commands
@@ -247,7 +249,7 @@ class Plex(commands.Cog):
                                'data']['total_file_size']
                     embed.add_field(name=str(l['count']) + " artists, " + str(l['parent_count']) + " albums, " + str(
                         l['child_count']) + " songs", value=str(l['section_name']), inline=False)
-        embed.add_field(name='\u200b', value="Total: " + px.filesize(size))
+        embed.add_field(name='\u200b', value="Total: " + filesize(size))
         await ctx.send(embed=embed)
 
     @plex.command(name="top", aliases=["pop"], pass_context=True)
@@ -301,7 +303,7 @@ class Plex(commands.Cog):
                 count = count + 1
             await ctx.send(embed=embed)
         else:
-            ctx.send("Please try again. Use 'movies','shows','artists' or 'users'")
+            await ctx.send("Please try again. Use 'movies','shows','artists' or 'users'")
 
     @plex_top.error
     async def plex_top_error(self, ctx, error):
@@ -387,15 +389,17 @@ class Plex(commands.Cog):
         count = 5
         cur = 0
         recently_added = px.t_request("get_recently_added", "count=" + str(count))
-        url = settings.TAUTULLI_BASE_URL + "/api/v2?apikey=" + settings.TAUTULLI_API_KEY + "&cmd=pms_image_proxy&img=" + \
-              recently_added['response']['data']['recently_added'][cur]['thumb']
-        e.set_image(url=url)
         listing = recently_added['response']['data']['recently_added'][cur]
-        e.description = "(" + str(cur + 1) + "/" + str(count) + ") " + str(
-            listing['grandparent_title'] if listing['grandparent_title'] != "" else (
-                listing['parent_title'] if listing['parent_title'] != "" else listing[
-                    'full_title'])) + " - [Watch Now](https://app.plex.tv/desktop#!/server/" + settings.PLEX_SERVER_ID + "/details?key=%2Flibrary%2Fmetadata%2F" + str(
-            recently_added['response']['data']['recently_added'][cur]['rating_key']) + ")"
+        url = '{base}/api/v2?apikey={key}&cmd=pms_image_proxy&img={thumb}'.format(base=settings.TAUTULLI_URL[0], key=settings.TAUTULLI_API_KEY[0], thumb=listing['thumb'])
+        e.set_image(url=url)
+        e.description = "({loc}/{count}) {title} - [Watch Now](https://app.plex.tv/desktop#!/server/{id}//details?key=%2Flibrary%2Fmetadata%2F{key})".format(
+            loc=str(cur + 1),
+            count=str(count),
+            title=(listing['grandparent_title'] if listing['grandparent_title'] else (listing['parent_title'] if listing['parent_title'] else listing[
+                    'full_title'])),
+            id=settings.PLEX_SERVER_ID,
+            key=listing['rating_key']
+        )
         ra_embed = await ctx.send(embed=e)
         nav = True
         while nav:
@@ -417,31 +421,39 @@ class Plex(commands.Cog):
                 px.t_request("delete_image_cache", None)
             else:
                 if reaction.emoji == u"\u27A1":
-                    if (cur + 1 < count):
-                        cur = cur + 1
-                        url = settings.TAUTULLI_BASE_URL + "/api/v2?apikey=" + settings.TAUTULLI_API_KEY + "&cmd=pms_image_proxy&img=" + \
-                              recently_added['response']['data']['recently_added'][cur]['thumb']
-                        e.set_image(url=url)
+                    if cur + 1 < count:
+                        cur += 1
                         listing = recently_added['response']['data']['recently_added'][cur]
-                        e.description = "(" + str(cur + 1) + "/" + str(count) + ") " + str(
-                            listing['grandparent_title'] if listing['grandparent_title'] != "" else (
-                                listing['parent_title'] if listing['parent_title'] != "" else listing[
-                                    'full_title'])) + " - [Watch Now](https://app.plex.tv/desktop#!/server/" + settings.PLEX_SERVER_ID + "/details?key=%2Flibrary%2Fmetadata%2F" + str(
-                            recently_added['response']['data']['recently_added'][cur]['rating_key']) + ")"
+                        url = '{base}/api/v2?apikey={key}&cmd=pms_image_proxy&img={thumb}'.format(
+                            base=settings.TAUTULLI_URL[0], key=settings.TAUTULLI_API_KEY[0], thumb=listing['thumb'])
+                        e.set_image(url=url)
+                        e.description = "({loc}/{count}) {title} - [Watch Now](https://app.plex.tv/desktop#!/server/{id}//details?key=%2Flibrary%2Fmetadata%2F{key})".format(
+                            loc=str(cur + 1),
+                            count=str(count),
+                            title=(listing['grandparent_title'] if listing['grandparent_title'] else (
+                                listing['parent_title'] if listing['parent_title'] else listing[
+                                    'full_title'])),
+                            id=settings.PLEX_SERVER_ID,
+                            key=listing['rating_key']
+                        )
                         await ra_embed.edit(embed=e)
                         await ra_embed.clear_reactions()
                 else:
                     if cur - 1 >= 0:
-                        cur = cur - 1
-                        url = settings.TAUTULLI_BASE_URL + "/api/v2?apikey=" + settings.TAUTULLI_API_KEY + "&cmd=pms_image_proxy&img=" + \
-                              recently_added['response']['data']['recently_added'][cur]['thumb']
-                        e.set_image(url=url)
+                        cur -= 1
                         listing = recently_added['response']['data']['recently_added'][cur]
-                        e.description = "(" + str(cur + 1) + "/" + str(count) + ") " + str(
-                            listing['grandparent_title'] if listing['grandparent_title'] != "" else (
-                                listing['parent_title'] if listing['parent_title'] != "" else listing[
-                                    'full_title'])) + " - [Watch Now](https://app.plex.tv/desktop#!/server/" + settings.PLEX_SERVER_ID + "/details?key=%2Flibrary%2Fmetadata%2F" + str(
-                            recently_added['response']['data']['recently_added'][cur]['rating_key']) + ")"
+                        url = '{base}/api/v2?apikey={key}&cmd=pms_image_proxy&img={thumb}'.format(
+                            base=settings.TAUTULLI_URL[0], key=settings.TAUTULLI_API_KEY[0], thumb=listing['thumb'])
+                        e.set_image(url=url)
+                        e.description = "({loc}/{count}) {title} - [Watch Now](https://app.plex.tv/desktop#!/server/{id}//details?key=%2Flibrary%2Fmetadata%2F{key})".format(
+                            loc=str(cur + 1),
+                            count=str(count),
+                            title=(listing['grandparent_title'] if listing['grandparent_title'] else (
+                                listing['parent_title'] if listing['parent_title'] else listing[
+                                    'full_title'])),
+                            id=settings.PLEX_SERVER_ID,
+                            key=listing['rating_key']
+                        )
                         await ra_embed.edit(embed=e)
                         await ra_embed.clear_reactions()
 
@@ -461,23 +473,33 @@ class Plex(commands.Cog):
                         if searchTerm.lower() in str(r['title']).lower():
                             if r['title'] in results_list or k == 'collection':
                                 results_list.append(r['title'] + " - " + r['library_name'])
-                                results = results + "[" + r['title'] + " - " + r[
-                                    'library_name'] + "](https://app.plex.tv/desktop#!/server/" + settings.PLEX_SERVER_ID + "/details?key=%2Flibrary%2Fmetadata%2F" + str(
-                                    r['rating_key']) + ")" + "\n"
+                                results += "[{title} - {lib}]((https://app.plex.tv/desktop#!/server/{id}//details?key=%2Flibrary%2Fmetadata%2F{key})\n".format(
+                                    title = r['title'],
+                                    lib=r['library_name'],
+                                    id=settings.PLEX_SERVER_ID,
+                                    key=r['rating_key']
+                                )
                             else:
                                 results_list.append(r['title'])
-                                results = results + "[" + r[
-                                    'title'] + "](https://app.plex.tv/desktop#!/server/" + settings.PLEX_SERVER_ID + "/details?key=%2Flibrary%2Fmetadata%2F" + str(
-                                    r['rating_key']) + ")" + "\n"
-                    if results != "":
+                                results += "[{title}](https://app.plex.tv/desktop#!/server/{id}/details?key=%2Flibrary%2Fmetadata%2F{key})\n".format(
+                                    title=r['title'],
+                                    id=settings.PLEX_SERVER_ID,
+                                    key=r['rating_key']
+                                )
+                    if results:
                         embed.add_field(name=k.capitalize() + ("s" if len(results_list) > 1 else ""),
                                         value=str(results), inline=False)
         await ctx.send(embed=embed)
 
+    @plex_search.error
+    async def plex_search_error(self, ctx, error):
+        print(error)
+        await ctx.send("Please include a search term.")
+
     @commands.Cog.listener()
     async def on_reaction_add(self, reaction, user):
         if reaction.emoji == '✅':
-            username = db.find_user_in_db('Plex', user.id)[0]
+            username = db.find_user_in_db(ServerOrDiscord='Plex', data=user.id)[0]
             if username:
                 url = px.urlInMessage(reaction.message)
                 if url:

@@ -10,12 +10,14 @@ import random
 import string
 import csv
 from datetime import datetime
-import emby.settings as settings
-import emby.emby_api as em
+from media_server.emby import settings as settings
+from media_server.emby import emby_api as em
 from helper.db_commands import DB
 from helper.pastebin import hastebin, privatebin
+import helper.discord_helper as discord_helper
 
-db = DB(SERVER_TYPE='Emby', SQLITE_FILE=settings.SQLITE_FILE, TRIAL_LENGTH=(settings.TRIAL_LENGTH * 3600), USE_DROPBOX=settings.USE_DROPBOX)
+db = DB(SERVER_TYPE='Emby', SQLITE_FILE=settings.SQLITE_FILE, TRIAL_LENGTH=(settings.TRIAL_LENGTH * 3600),
+        BLACKLIST_FILE=settings.BLACKLIST_FILE, USE_DROPBOX=settings.USE_DROPBOX)
 
 
 def password(length):
@@ -85,6 +87,11 @@ async def add_to_emby(username, discordId, note, useEmbyConnect=False):
     """
     try:
         p = None
+        if settings.ENABLE_BLACKLIST:
+            if db.check_blacklist(username):
+                return False, 'blacklist', 'username'
+            if db.check_blacklist(discordId):
+                return False, 'blacklist', 'id'
         r = em.makeUser(username)
         if str(r.status_code).startswith('2'):
             uid = json.loads(r.text)['Id']
@@ -93,8 +100,8 @@ async def add_to_emby(username, discordId, note, useEmbyConnect=False):
             if not p:
                 print("Password update for {} failed. Moving on...".format(username))
             if useEmbyConnect:
-                await em.addConnectUser(connect_username=username, user_id=uid)
-            success = db.add_user_to_db(discordId, username, uid, note)
+                em.addConnectUser(connect_username=username, user_id=uid)
+            success = db.add_user_to_db(discordId=discordId, username=username, note=note, uid=uid)
             if success:
                 if update_policy(uid, settings.EMBY_USER_POLICY):
                     policyEnforced = True
@@ -115,11 +122,12 @@ def remove_from_emby(id):
     500 - unknown error
     """
     try:
-        embyId = db.find_user_in_db("Emby", id)
+        embyId = db.find_user_in_db(ServerOrDiscord="Emby", data=id)
         if not embyId:
             return 700  # user not found
         r = em.deleteUser(embyId)
-        if not str(r.status_code).startswith('2'):
+        if not r:
+            print(r.content.decode("utf-8"))
             return 600  # user not deleted
         db.remove_user_from_db(id)
         return 200  # user removed successfully
@@ -130,14 +138,16 @@ def remove_from_emby(id):
 
 def remove_nonsub(memberID):
     if memberID not in settings.EXEMPT_SUBS:
-        remove_from_emby(memberID)
+        return remove_from_emby(memberID)
 
 
 async def backup_database():
-    db.backup('backup/EmbyDiscord.db.bk-{}'.format(datetime.now().strftime("%m-%d-%y")))
+    db.backup(file=settings.SQLITE_FILE,
+              rename='backup/EmbyDiscord.db.bk-{}'.format(datetime.now().strftime("%m-%d-%y")))
+    db.backup(file='../blacklist.db', rename='backup/blacklist.db.bk-{}'.format(datetime.now().strftime("%m-%d-%y")))
 
 
-class Emby(commands.Cog):
+class EmbyManager(commands.Cog):
 
     async def purge_winners(self, ctx):
         try:
@@ -180,11 +190,11 @@ class Emby(commands.Cog):
 
     async def remove_winner(self, embyId):
         try:
-            id = db.find_user_in_db("Discord", embyId)
+            id = db.find_user_in_db(ServerOrDiscord="Discord", data=embyId)
             if id is not None:
-                code = remove_from_emby(embyId)
-                if code.startswith('2'):
-                    user = self.bot.get_user(int(id))
+                s = remove_from_emby(embyId)
+                if s == 200:
+                    user = self.bot
                     await user.create_dm()
                     await user.dm_channel.send(
                         "You have been removed from {} due to inactivity.".format(str(settings.EMBY_SERVER_NICKNAME)))
@@ -198,15 +208,14 @@ class Emby(commands.Cog):
 
     async def check_subs(self):
         print("Checking Emby subs...")
-        exemptRoles = []
-        allRoles = self.bot.get_guild(int(settings.DISCORD_SERVER_ID)).roles
-        for r in allRoles:
-            if r.name in settings.SUB_ROLES:
-                exemptRoles.append(r)
-        for member in self.bot.get_guild(int(settings.DISCORD_SERVER_ID)).members:
-            if not any(x in member.roles for x in exemptRoles):
-                remove_nonsub(member.id)
-        print("Emby Subs check completed.")
+        for member in discord_helper.get_users_without_roles(bot=self.bot, roleNames=settings.SUB_ROLES,
+                                                             guildID=settings.DISCORD_SERVER_ID):
+            s = remove_nonsub(member.id)
+            if s == 700:
+                print("{} was not a past Emby subscriber".format(member))
+            elif s != 200:
+                print("Couldn't remove {} from Emby".format(member))
+        print("Emby subs check complete.")
 
     async def check_trials(self):
         print("Checking Emby trials...")
@@ -215,12 +224,13 @@ class Emby(commands.Cog):
                                        name=settings.TRIAL_ROLE_NAME)
         for u in trials:
             print("Ending trial for {}".format(str(u[0])))
-            remove_from_emby(int(u[0]))
             try:
-                user = self.bot.get_guild(int(settings.DISCORD_SERVER_ID)).get_member(int(u[0]))
-                await user.create_dm()
-                await user.dm_channel.send(settings.TRIAL_END_NOTIFICATION)
-                await user.remove_roles(trial_role, reason="Trial has ended.")
+                s = remove_from_emby(int(u[0]))
+                if s == 200:
+                    user = self.bot.get_guild(int(settings.DISCORD_SERVER_ID))
+                    await user.create_dm()
+                    await user.dm_channel.send(settings.TRIAL_END_NOTIFICATION)
+                    await user.remove_roles(trial_role, reason="Trial has ended.")
             except Exception as e:
                 print(e)
                 print("Discord user {} not found.".format(str(u[0])))
@@ -238,7 +248,7 @@ class Emby(commands.Cog):
     async def check_trials_timer(self):
         await self.check_trials()
 
-    @commands.group(aliases=["Emby", "em", "JF"], pass_context=True)
+    @commands.group(name="em", aliases=["EM", "EmbyMan", "embyman", "EmbyManager", "embymanager"], pass_context=True)
     async def emby(self, ctx: commands.Context):
         """
         Emby Media Server commands
@@ -253,7 +263,7 @@ class Emby(commands.Cog):
         Check if you or another user has access to the Emby server
         """
         if EmbyUsername is None:
-            name, note = db.find_username_in_db("Emby", ctx.message.author.id)
+            name, note = db.find_username_in_db(ServerOrDiscord="Emby", data=ctx.message.author.id)
         else:
             name = EmbyUsername
         if name in get_emby_users().keys():
@@ -266,6 +276,40 @@ class Emby(commands.Cog):
 
     @emby_access.error
     async def emby_access_error(self, ctx, error):
+        print(error)
+        await ctx.send("Sorry, something went wrong.")
+
+    @emby.command(name="blacklist", aliases=['block'], pass_context=True)
+    @commands.has_role(settings.DISCORD_ADMIN_ROLE_NAME)
+    async def emby_blacklist(self, ctx: commands.Context, AddOrRemove: str, DiscordUserOrEmbyUsername=None):
+        """
+        Blacklist a Emby username or Discord ID
+        """
+        if DiscordUserOrEmbyUsername:
+            if isinstance(DiscordUserOrEmbyUsername, (discord.Member, discord.User)):
+                id = DiscordUserOrEmbyUsername.id
+            else:
+                id = DiscordUserOrEmbyUsername
+        if AddOrRemove.lower() == 'add':
+            success = db.add_to_blacklist(name_or_id=id)
+            if success:
+                await ctx.send("User added to blacklist.")
+            else:
+                await ctx.send("Something went wrong while adding user to the blacklist.")
+        elif AddOrRemove.lower() == 'remove':
+            success = db.remove_from_blacklist(name_or_id=id)
+            if success:
+                await ctx.send("User removed from blacklist.")
+            else:
+                await ctx.send("Something went wrong while removing user from the blacklist.")
+        elif AddOrRemove.lower() == 'list':
+            blacklist_entries = db.get_all_blacklist()
+            await ctx.send('\n'.join([e[0] for e in blacklist_entries]))
+        else:
+            await ctx.send("Invalid blacklist action.")
+
+    @emby_blacklist.error
+    async def emby_blacklist_error(self, ctx, error):
         print(error)
         await ctx.send("Sorry, something went wrong.")
 
@@ -404,14 +448,18 @@ class Emby(commands.Cog):
         """
         Add a Discord user to Emby
         """
-        # s, u, p = add_to_emby(username, user.id, 's', useEmbyConnect=(True if useEmbyConnect else False))
-        s, u, p = await add_to_emby(username, user.id, 's', useEmbyConnect=False)
+        s, u, p = await add_to_emby(username, user.id, 's', useEmbyConnect=(True if useEmbyConnect else False))
         if s:
             await sendAddMessage(user, username, (p if settings.CREATE_PASSWORD else settings.NO_PASSWORD_MESSAGE))
             await ctx.send(
                 "You've been added, {}! Please check your direct messages for login information.".format(user.mention))
         else:
-            await ctx.send("An error occurred while adding {}".format(user.mention))
+            if "exist" in u:
+                await ctx.send(u)
+            elif "blacklist" in u:
+                await ctx.send("That {} is blacklisted.".format(p))
+            else:
+                await ctx.send("An error occurred while adding {}".format(user.mention))
 
     @emby_add.error
     async def emby_add_error(self, ctx, error):
@@ -424,7 +472,7 @@ class Emby(commands.Cog):
         """
         Connect a local Emby user to an Emby Connect user
         """
-        user_id = db.find_user_in_db("Emby", user.id)
+        user_id = db.find_user_in_db(ServerOrDiscord="Emby", data=user.id)
         if user_id:
             res = await em.addConnectUser(embyConnectUsername, user_id)
             if str(res.status_code).startswith('2'):
@@ -467,11 +515,16 @@ class Emby(commands.Cog):
         """
         Start a trial of Emby
         """
-        s, u, p = add_to_emby(EmbyUsername, user.id, 't')
+        s, u, p = add_to_emby(EmbyUsername, user.id, 't', useEmbyConnect=False)
         if s:
             await sendAddMessage(user, EmbyUsername, (p if settings.CREATE_PASSWORD else settings.NO_PASSWORD_MESSAGE))
         else:
-            await ctx.send("An error occurred while starting a trial for {}".format(user.mention))
+            if "exist" in u:
+                await ctx.send(u)
+            elif "blacklist" in u:
+                await ctx.send("That {} is blacklisted.".format(p))
+            else:
+                await ctx.send("An error occurred while starting a trial for {}".format(user.mention))
 
     @emby_trial.error
     async def emby_trial_error(self, ctx, error):
@@ -498,7 +551,7 @@ class Emby(commands.Cog):
             if len(subType) > 4:
                 await ctx.send("subType must be less than 5 characters long.")
             else:
-                new_entry = db.add_user_to_db(user.id, EmbyUsername, embyId, subType)
+                new_entry = db.add_user_to_db(discordId=user.id, username=EmbyUsername, note=subType, uid=embyId)
                 if new_entry:
                     if subType == 't':
                         await ctx.send("Trial user was added/new timestamp issued.")
@@ -527,7 +580,7 @@ class Emby(commands.Cog):
         """
         Find Discord member's Emby username
         """
-        name, note = db.find_username_in_db("Emby", user.id)
+        name, note = db.find_username_in_db(ServerOrDiscord="Emby", data=user.id)
         if name:
             await ctx.send('{} is Emby user: {}{}'.format(user.mention, name,
                                                           (" [Trial]" if note == 't' else " [Subscriber]")))
@@ -539,7 +592,7 @@ class Emby(commands.Cog):
         """
         Find Emby user's Discord name
         """
-        id, note = db.find_username_in_db("Discord", EmbyUsername)
+        id, note = db.find_username_in_db(ServerOrDiscord="Discord", data=EmbyUsername)
         if id:
             await ctx.send('{} is Discord user: {}'.format(EmbyUsername, self.bot.get_user(int(id)).mention))
         else:
@@ -565,8 +618,8 @@ class Emby(commands.Cog):
         Get database entry for Emby username
         """
         embed = discord.Embed(title=("Info for {}".format(str(EmbyUsername))))
-        n = db.describe_table("users")
-        d = db.find_entry_in_db("EmbyUsername", EmbyUsername)
+        n = db.describe_table(file=settings.SQLITE_FILE, table="users")
+        d = db.find_entry_in_db(fieldType="EmbyUsername", data=EmbyUsername)
         if d:
             for i in range(0, len(n)):
                 val = str(d[i])
@@ -586,8 +639,8 @@ class Emby(commands.Cog):
         Get database entry for Discord user
         """
         embed = discord.Embed(title=("Info for {}".format(user.name)))
-        n = db.describe_table("users")
-        d = db.find_entry_in_db("DiscordID", user.id)
+        n = db.describe_table(file=settings.SQLITE_FILE, table="users")
+        d = db.find_entry_in_db(fieldType="DiscordID", data=user.id)
         if d:
             for i in range(0, len(n)):
                 name = str(n[i][1])
@@ -622,7 +675,7 @@ class Emby(commands.Cog):
             for row in reader:
                 emby_username = row['Discord_Tag'].split("#")[0]  # Emby username will be Discord username
                 user = discord.utils.get(ctx.message.guild.members, name=emby_username)
-                s, u, p = add_to_emby(emby_username, user.id, 's')  # Users added as 'Subscribers'
+                s, u, p = add_to_emby(emby_username, user.id, 's', useEmbyConnect=False)  # Users added as 'Subscribers'
                 if s:
                     await sendAddMessage(user, emby_username,
                                          (p if settings.CREATE_PASSWORD else settings.NO_PASSWORD_MESSAGE))
@@ -645,7 +698,7 @@ class Emby(commands.Cog):
             if message.channel.id == settings.WINNER_CHANNEL and discord.utils.get(message.guild.roles,
                                                                                    name=settings.TEMP_WINNER_ROLE_NAME) in message.author.roles:
                 username = message.content.strip()  # Only include username, nothing else
-                s, u, p = add_to_emby(username, message.author.id, 'w')
+                s, u, p = add_to_emby(username, message.author.id, 'w', useEmbyConnect=False)
                 if s:
                     await sendAddMessage(message.author, username,
                                          (p if settings.CREATE_PASSWORD else settings.NO_PASSWORD_MESSAGE))
@@ -656,15 +709,17 @@ class Emby(commands.Cog):
                         discord.utils.get(message.guild.roles, name=settings.TEMP_WINNER_ROLE_NAME),
                         reason="Winner was processed successfully.")
                 else:
-                    if "exist" in s:
-                        await message.channel.send(s)
+                    if "exist" in u:
+                        await message.channel.send(u)
+                    elif "blacklist" in u:
+                        await message.channel.send("That {} is blacklisted.".format(p))
                     else:
                         await message.channel.send("An error occurred while adding {}".format(message.author.mention))
 
     @commands.Cog.listener()
     async def on_ready(self):
-        #self.check_trials_timer.start()
-        #self.check_subs_timer.start()
+        # self.check_trials_timer.start()
+        # self.check_subs_timer.start()
         pass
 
     def __init__(self, bot):
@@ -674,4 +729,4 @@ class Emby(commands.Cog):
 
 
 def setup(bot):
-    bot.add_cog(Emby(bot))
+    bot.add_cog(EmbyManager(bot))

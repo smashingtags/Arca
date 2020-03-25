@@ -1,13 +1,16 @@
 #!/usr/bin/python3
 
+import os
 import discord
 from discord.ext import commands
-import sys, traceback, os
 import helper.cog_handler as cog_handler
 
 PREFIX = "*"
-USE_REMOTE_CONFIG = True
-# True: Load cogs from a remote "cogs.txt" file in Dropbox (will need to know folder.__init__ of each)
+USE_DROPBOX = False
+# True: Can download/upload cogs from Dropbox
+# False: Cogs have to be local
+USE_REMOTE_CONFIG = False
+# True: Load/store cogs from a remote "cogs.txt" file in Dropbox (will need to know folder.file of each)
 # False: Load cogs from the ext list below.
 
 bot = commands.Bot(command_prefix=PREFIX)
@@ -15,30 +18,36 @@ bot = commands.Bot(command_prefix=PREFIX)
 formatter = commands.HelpCommand(show_check_failure=False)
 
 exts = [
-    # "espn.espn",
-    # "plex.plex",
-    # "plex.plex_manager",
-    # "plex.plex_namanger_nodb",
-    # "core.manager",
-    # "jellyfin.jellyfin",
-    # "emby.emby",
+    # "media_server.plex.plex",
+    # "media_server.plex.plex_manager",
+    # "media_server.plex.plex_namanger_nodb",
+    # "media_server.olaris.olaris_manager",
+    # "media_server.jellyfin.jellyfin_manager",
+    # "media_server.emby.emby_manager",
+    # "media_server.booksonic.booksonic",
+    # "media_server.rclone.rclone",
     # "news.news",
     # "MARTA.marta",
-    # "booksonic.booksonic",
-    # "roles.roles",
-    # "yahoofantasy.yahoofantasy",
+    # "discord.roles.roles",
+    # "core.manager",
+    # "sports.espn.espn",
+    # "sports.yahoofantasy.yahoofantasy",
     # "smart_home.sengled_lights.sengled",
     # "smart_home.google_home.google_home",
     # "smart_home.wink.wink",
-    "general.coronavirus",
-    "general.speedtest",
-    "general.__init__"
+    # "general.coronavirus",
+    # "general.speedtest",
+    # "discord_cogs.__init__",
 ]
-
 if USE_REMOTE_CONFIG:
+    USE_DROPBOX = True
+    # You can only use cog_handler if you fill out the DROPBOX_API_KEY environmental variable
+    cog_handler.USE_REMOTE_CONFIG = True
     exts = cog_handler.load_remote_config("cogs.txt")
 for ext in exts:
     bot.load_extension(ext)
+if USE_DROPBOX:
+    cog_handler.USE_DROPBOX = True  # USE_DROPBOX has to be enabled for remote config to work
 bot.load_extension("helper.cog_handler")
 
 
